@@ -26,4 +26,21 @@ class PengaduanController extends Controller
 
         return redirect()->back()->with('success', 'Status pengaduan berhasil diperbarui!');
     }
+    public function ajukanBerhenti(Request $request)
+{
+    $transaksi = Transaksi::findOrFail($request->transaksi_id);
+
+    // 1. Update status sewa menjadi 'Proses Keluar'
+    $transaksi->update(['status_sewa' => 'Proses Keluar']);
+
+    // 2. Buat Laporan Otomatis ke Admin
+    \App\Models\Pengaduan::create([
+        'user_id' => auth()->id(),
+        'masalah' => 'Pengajuan Berhenti Kost - Kamar ' . $transaksi->kamar->nomor_kamar,
+        'status' => 'Menunggu',
+        'kategori' => 'Check Out' // Opsional jika ada kolom kategori
+    ]);
+
+    return redirect()->back()->with('success', 'Permohonan Berhenti Kost telah dikirim ke Admin.');
+}
 }

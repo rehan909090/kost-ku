@@ -4,7 +4,8 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Models\Kamar; 
-use App\Models\Transaksi; // Pastikan ini ada untuk menghitung statistik
+use App\Models\Transaksi;
+use App\Models\Pengaduan;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Carbon\Carbon;
@@ -12,22 +13,20 @@ use Carbon\Carbon;
 class KamarController extends Controller
 {
     /**
-     * FUNGSI DASHBOARD: Menampilkan Statistik & Grafik
+     * FUNGSI DASHBOARD: Statistik Pendapatan & Laporan Baru
      */
     public function adminDashboard()
     {
         $totalKamar = Kamar::count();
+        // Menggunakan kolom 'is_tersedia' sesuai dengan database Anda
         $kamarTerisi = Kamar::where('is_tersedia', false)->count();
         $kamarKosong = Kamar::where('is_tersedia', true)->count();
         
-        // Menghitung transaksi yang statusnya 'Menunggu Verifikasi'
         $transaksiPending = Transaksi::where('status', 'Menunggu Verifikasi')->count();
-        
-        // Menghitung total pendapatan dari transaksi yang sudah lunas
-        $totalPendapatan = Transaksi::where('status', 'Lunas / Terkonfirmasi')->sum('total_harga');
+        $totalPendapatan = Transaksi::where('status', 'Lunas')->sum('total_harga');
 
-        // Menghitung pengaduan yang belum selesai (Menunggu & Proses)
-        $pengaduanPending = \App\Models\Pengaduan::whereIn('status', ['Menunggu', 'Proses'])->count();
+        // Menghitung pengaduan yang butuh tindakan (Status: Menunggu atau Proses)
+        $pengaduanPending = Pengaduan::whereIn('status', ['Menunggu', 'Proses'])->count();
 
         return view('admin.dashboard', compact(
             'totalKamar', 
@@ -36,24 +35,83 @@ class KamarController extends Controller
             'transaksiPending',
             'totalPendapatan',
             'pengaduanPending'
-            
         ));
     }
-    public function index(Request $request)
-{
-    $query = Kamar::query();
 
-    // Logika Filter
-    if ($request->has('status') && $request->status !== '') {
-        $query->where('is_tersedia', $request->status);
+    /**
+     * FUNGSI KELOLA PENGHUNI: Menampilkan Daftar Penghuni Aktif
+     */
+    public function kelolaPenghuni()
+    {
+        $penghunis = Transaksi::with(['user', 'kamar'])
+            ->where('status', 'Lunas')
+            ->whereIn('status_sewa', ['Aktif', 'Proses Keluar'])
+            ->latest()
+            ->get();
+
+        return view('admin.penghuni.index', compact('penghunis'));
     }
 
-    // Pagination 5 item per halaman
-    // appends(request()->query()) memastikan filter tetap aktif saat pindah halaman
-    $kamars = $query->latest()->paginate(5)->withQueryString();
+    /**
+     * FUNGSI KONFIRMASI CHECKOUT (PENTING: Menangani Error 500 Anda)
+     */
+    public function konfirmasiCheckout($id)
+    {
+        // 1. Cari transaksi berdasarkan ID
+        $transaksi = Transaksi::findOrFail($id);
 
-    return view('admin.kamar.index', compact('kamars'));
-}
+        // 2. Update status sewa menjadi Selesai
+        $transaksi->update([
+            'status_sewa' => 'Selesai'
+        ]);
+
+        // 3. Update status kamar menjadi Tersedia kembali (is_tersedia = true)
+        if ($transaksi->kamar) {
+            $transaksi->kamar->update([
+                'is_tersedia' => true
+            ]);
+        }
+
+        return redirect()->route('admin.transaksi.index')
+                         ->with('success', 'Check-out berhasil dikonfirmasi. Kamar nomor ' . $transaksi->kamar->nomor_kamar . ' sekarang tersedia kembali.');
+    }
+
+    /**
+     * FUNGSI LAPORAN: Menampilkan Laporan Kerusakan
+     */
+    public function laporanIndex()
+    {
+        $pengaduans = Pengaduan::with('user')->latest()->get();
+        return view('admin.pengaduan.index', compact('pengaduans'));
+    }
+
+    /**
+     * Update status laporan pengaduan
+     */
+    public function updateStatusLaporan(Request $request, $id)
+    {
+        $request->validate([
+            'status' => 'required|in:Menunggu,Proses,Selesai'
+        ]);
+
+        $laporan = Pengaduan::findOrFail($id);
+        $laporan->update(['status' => $request->status]);
+        
+        return back()->with('success', 'Status laporan berhasil diperbarui menjadi ' . $request->status);
+    }
+
+    /**
+     * MANAJEMEN DATA KAMAR (CRUD)
+     */
+    public function index(Request $request)
+    {
+        $query = Kamar::query();
+        if ($request->has('status') && $request->status !== '') {
+            $query->where('is_tersedia', $request->status);
+        }
+        $kamars = $query->latest()->paginate(5)->withQueryString();
+        return view('admin.kamar.index', compact('kamars'));
+    }
 
     public function create()
     {
@@ -68,11 +126,6 @@ class KamarController extends Controller
             'fasilitas' => 'required',
             'harga_per_bulan' => 'required|numeric',
             'foto_kamar' => 'image|mimes:jpeg,png,jpg|max:2048',
-            'ukuran' => 'nullable|string',
-            'kamar_mandi' => 'nullable|string',
-            'listrik' => 'nullable|string',
-            'keamanan' => 'nullable|string',
-            'lokasi_akses' => 'nullable|string',
         ]);
 
         $path = $request->hasFile('foto_kamar') ? $request->file('foto_kamar')->store('kamars', 'public') : null;
@@ -83,7 +136,7 @@ class KamarController extends Controller
             'fasilitas' => $request->fasilitas,
             'harga_per_bulan' => $request->harga_per_bulan,
             'foto_kamar' => $path,
-            'is_tersedia' => true,
+            'is_tersedia' => true, // Default tersedia untuk kamar baru
             'ukuran' => $request->ukuran,
             'kamar_mandi' => $request->kamar_mandi,
             'listrik' => $request->listrik,
@@ -103,18 +156,11 @@ class KamarController extends Controller
     public function update(Request $request, $id)
     {
         $kamar = Kamar::findOrFail($id);
-
         $request->validate([
             'nomor_kamar' => 'required|unique:kamars,nomor_kamar,'.$id,
             'tipe' => 'required',
             'fasilitas' => 'required',
             'harga_per_bulan' => 'required|numeric',
-            'foto_kamar' => 'nullable|image|mimes:jpeg,png,jpg|max:2048',
-            'ukuran' => 'nullable|string',
-            'kamar_mandi' => 'nullable|string',
-            'listrik' => 'nullable|string',
-            'keamanan' => 'nullable|string',
-            'lokasi_akses' => 'nullable|string',
         ]);
 
         if ($request->hasFile('foto_kamar')) {
@@ -149,14 +195,5 @@ class KamarController extends Controller
         $kamar->delete();
 
         return redirect()->route('admin.kamar.index')->with('success', 'Kamar berhasil dihapus!');
-    }
-
-    public function kelolaPenghuni()
-    {
-        $penghunis = Transaksi::with(['user', 'kamar'])
-            ->where('status', 'Lunas / Terkonfirmasi')
-            ->get();
-
-        return view('admin.penghuni.index', compact('penghunis'));
     }
 }
